@@ -817,108 +817,182 @@ export class PostgresCohortMembersService {
   }
 
   async getUsers(where: any, options: any, order: any, searchtext?: string) {
-    let whereCase = ``;
-    let limit, offset;
+    // Use TypeORM QueryBuilder for secure parameterized queries
+    const queryBuilder = this.usersRepository
+      .createQueryBuilder('U')
+      .innerJoin('CohortMembers', 'CM', 'CM.userId = U.userId')
+      .innerJoin('UserRolesMapping', 'UR', 'UR.userId = U.userId')
+      .innerJoin('Roles', 'R', 'R.roleId = UR.roleId')
+      .select([
+        'U.userId',
+        'U.username',
+        'U.email',
+        'U.firstName',
+        'U.middleName',
+        'U.lastName',
+        'R.name as role',
+        'U.district',
+        'U.state',
+        'U.mobile',
+        'U.deviceId',
+        'U.gender',
+        'U.dob',
+        'U.country',
+        'CM.status',
+        'CM.statusReason',
+        'CM.cohortMembershipId',
+        'CM.cohortId',
+        'CM.createdAt',
+        'CM.updatedAt',
+        'U.createdBy',
+        'U.updatedBy',
+        'COUNT(*) OVER() as total_count',
+      ]);
 
-    if (where.length > 0) {
-      whereCase = 'WHERE ';
-
-      const processCondition = ([key, value]) => {
+    // Apply WHERE conditions with parameterized queries
+    if (where && where.length > 0) {
+      where.forEach(([key, value]) => {
         switch (key) {
           case 'role':
-            return `R."name"='${value}'`;
-          case 'status': {
-            const statusValues = Array.isArray(value)
-              ? value.map((status) => `'${status}'`).join(', ')
-              : `'${value}'`;
-            return `CM."status" IN (${statusValues})`;
-          }
-          case 'firstName': {
-            return `U."firstName" ILIKE '%${value}%'`;
-          }
-          case 'email': {
-            return `U."email" ILIKE '%${value}%'`;
-          }
-          case 'country': {
-            const countryValues = Array.isArray(value)
-              ? value.map((country) => `'${country}'`).join(', ')
-              : `'${value}'`;
-            return `U."country" IN (${countryValues})`;
-          }
-          case 'cohortAcademicYearId': {
-            const cohortIdAcademicYear = Array.isArray(value)
-              ? value.map((id) => `'${id}'`).join(', ')
-              : `'${value}'`;
-            return `CM."cohortAcademicYearId" IN (${cohortIdAcademicYear})`;
-          }
-          case 'cohortId': {
-            //Handles UUID array properly
-            const formattedIds = Array.isArray(value)
-              ? value.map((id) => `'${id}'`).join(', ')
-              : `'${value}'`;
-            return `CM."${key}" IN (${formattedIds})`;
-          }
-          default: {
-            return `CM."${key}"='${value}'`;
-          }
+            queryBuilder.andWhere('R.name = :role', { role: value });
+            break;
+          case 'status':
+            if (Array.isArray(value)) {
+              queryBuilder.andWhere('CM.status IN (:...statuses)', {
+                statuses: value,
+              });
+            } else {
+              queryBuilder.andWhere('CM.status = :status', { status: value });
+            }
+            break;
+          case 'firstName':
+            queryBuilder.andWhere('U.firstName ILIKE :firstName', {
+              firstName: `%${value}%`,
+            });
+            break;
+          case 'email':
+            queryBuilder.andWhere('U.email ILIKE :email', {
+              email: `%${value}%`,
+            });
+            break;
+          case 'country':
+            if (Array.isArray(value)) {
+              queryBuilder.andWhere('U.country IN (:...countries)', {
+                countries: value,
+              });
+            } else {
+              queryBuilder.andWhere('U.country = :country', { country: value });
+            }
+            break;
+          case 'cohortAcademicYearId':
+            if (Array.isArray(value)) {
+              queryBuilder.andWhere(
+                'CM.cohortAcademicYearId IN (:...cohortAcademicYearIds)',
+                { cohortAcademicYearIds: value }
+              );
+            } else {
+              queryBuilder.andWhere(
+                'CM.cohortAcademicYearId = :cohortAcademicYearId',
+                { cohortAcademicYearId: value }
+              );
+            }
+            break;
+          case 'cohortId':
+            if (Array.isArray(value)) {
+              queryBuilder.andWhere('CM.cohortId IN (:...cohortIds)', {
+                cohortIds: value,
+              });
+            } else {
+              queryBuilder.andWhere('CM.cohortId = :cohortId', {
+                cohortId: value,
+              });
+            }
+            break;
+          default:
+            // Validate column name to prevent SQL injection
+            const validColumns = [
+              'userId',
+              'status',
+              'cohortId',
+              'cohortAcademicYearId',
+              'createdAt',
+              'updatedAt',
+            ];
+            if (validColumns.includes(key)) {
+              queryBuilder.andWhere(`CM.${key} = :${key}`, { [key]: value });
+            }
+            break;
         }
-      };
-      whereCase += where.map(processCondition).join(' AND ');
+      });
     }
 
-    // Add searchtext filter if provided
+    // Add searchtext filter with parameterized ILIKE
     if (searchtext && searchtext.trim().length >= 2) {
-      try {
-        const searchWhereClause = this.buildSearchTextWhereClause(searchtext);
-        if (searchWhereClause) {
-          const searchCondition = searchWhereClause.replace(/^AND\s+/, '');
-          if (whereCase === 'WHERE ') {
-            whereCase += searchCondition;
-          } else {
-            whereCase += ` AND ${searchCondition}`;
-          }
+      const searchTerms = searchtext
+        .trim()
+        .split(/\s+/)
+        .filter((term) => term.length > 0);
+
+      searchTerms.forEach((term, index) => {
+        const isEmail = term.includes('@');
+        const paramName = `searchTerm${index}`;
+
+        if (isEmail) {
+          queryBuilder.andWhere(
+            `(U.email ILIKE :${paramName} OR U.username ILIKE :${paramName})`,
+            { [paramName]: `%${term}%` }
+          );
+        } else {
+          queryBuilder.andWhere(
+            `(U.username ILIKE :${paramName} OR U.email ILIKE :${paramName} OR U.firstName ILIKE :${paramName} OR U.middleName ILIKE :${paramName} OR U.lastName ILIKE :${paramName})`,
+            { [paramName]: `%${term}%` }
+          );
         }
-      } catch (error) {
-        console.error('Error building search text where clause:', error);
-        // Continue without search filter if there's an error
-      }
+      });
     }
 
-    let query = `SELECT U."userId", U."username",U."email", U."firstName", U."middleName", U."lastName", R."name" AS role, U."district", U."state",U."mobile",U."deviceId",U."gender",U."dob",U."country",
-      CM."status", CM."statusReason",CM."cohortMembershipId",CM."cohortId",CM."status",CM."createdAt", CM."updatedAt",U."createdBy",U."updatedBy", COUNT(*) OVER() AS total_count  FROM public."CohortMembers" CM
-      INNER JOIN public."Users" U
-      ON CM."userId" = U."userId"
-      INNER JOIN public."UserRolesMapping" UR
-      ON UR."userId" = U."userId"
-      INNER JOIN public."Roles" R
-      ON R."roleId" = UR."roleId" ${whereCase}`;
-
-    options.forEach((option) => {
-      if (option[0] === 'limit') {
-        limit = option[1];
-      }
-      if (option[0] === 'offset') {
-        offset = option[1];
-      }
-    });
-
+    // Apply ORDER BY with validation
     if (order && Object.keys(order).length > 0) {
       const orderField = Object.keys(order)[0];
       const orderDirection =
         order[orderField].toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-      query += ` ORDER BY U."${orderField}" ${orderDirection}`;
+
+      // Validate orderField to prevent SQL injection
+      const validOrderFields = [
+        'userId',
+        'username',
+        'email',
+        'firstName',
+        'middleName',
+        'lastName',
+        'district',
+        'state',
+        'mobile',
+        'deviceId',
+        'gender',
+        'dob',
+        'country',
+        'createdAt',
+        'updatedAt',
+      ];
+      if (validOrderFields.includes(orderField)) {
+        queryBuilder.orderBy(`U.${orderField}`, orderDirection);
+      } else {
+        queryBuilder.orderBy('U.createdAt', 'DESC'); // Default fallback
+      }
     }
 
-    if (limit !== undefined) {
-      query += ` LIMIT ${limit}`;
-    }
+    // Apply pagination
+    options.forEach((option) => {
+      if (option[0] === 'limit') {
+        queryBuilder.limit(option[1]);
+      }
+      if (option[0] === 'offset') {
+        queryBuilder.offset(option[1]);
+      }
+    });
 
-    if (offset !== undefined) {
-      query += ` OFFSET ${offset}`;
-    }
-
-    const result = await this.usersRepository.query(query);
-
+    const result = await queryBuilder.getRawMany();
     return result;
   }
 
